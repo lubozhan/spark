@@ -20,7 +20,7 @@ package org.apache.spark.sql.catalyst
 import org.apache.spark.sql.catalyst.analysis.{GetColumnByOrdinal, UnresolvedAttribute, UnresolvedExtractValue}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.objects._
-import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, DateTimeUtils, GenericArrayData}
+import org.apache.spark.sql.catalyst.util.{DateTimeUtils, GenericArrayData}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
@@ -88,8 +88,10 @@ object ScalaReflection extends ScalaReflection {
   }
 
   /**
-   * Given a type `T` this function constructs and ObjectType that holds a class of type
-   * Array[T].  Special handling is performed for primitive types to map them back to their raw
+   * Given a type `T` this function constructs `ObjectType` that holds a class of type
+   * `Array[T]`.
+   *
+   * Special handling is performed for primitive types to map them back to their raw
    * JVM form instead of the Scala Array that handles auto boxing.
    */
   private def arrayClassFor(tpe: `Type`): ObjectType = ScalaReflectionLock.synchronized {
@@ -204,51 +206,53 @@ object ScalaReflection extends ScalaReflection {
       case t if t <:< localTypeOf[java.lang.Integer] =>
         val boxedType = classOf[java.lang.Integer]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Long] =>
         val boxedType = classOf[java.lang.Long]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Double] =>
         val boxedType = classOf[java.lang.Double]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Float] =>
         val boxedType = classOf[java.lang.Float]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Short] =>
         val boxedType = classOf[java.lang.Short]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Byte] =>
         val boxedType = classOf[java.lang.Byte]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Boolean] =>
         val boxedType = classOf[java.lang.Boolean]
         val objectType = ObjectType(boxedType)
-        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, propagateNull = true)
+        StaticInvoke(boxedType, objectType, "valueOf", getPath :: Nil, returnNullable = false)
 
       case t if t <:< localTypeOf[java.sql.Date] =>
         StaticInvoke(
           DateTimeUtils.getClass,
           ObjectType(classOf[java.sql.Date]),
           "toJavaDate",
-          getPath :: Nil)
+          getPath :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.sql.Timestamp] =>
         StaticInvoke(
           DateTimeUtils.getClass,
           ObjectType(classOf[java.sql.Timestamp]),
           "toJavaTimestamp",
-          getPath :: Nil)
+          getPath :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.String] =>
         Invoke(getPath, "toString", ObjectType(classOf[String]), returnNullable = false)
@@ -333,31 +337,12 @@ object ScalaReflection extends ScalaReflection {
         // TODO: add walked type path for map
         val TypeRef(_, _, Seq(keyType, valueType)) = t
 
-        val keyData =
-          Invoke(
-            MapObjects(
-              p => deserializerFor(keyType, Some(p), walkedTypePath),
-              Invoke(getPath, "keyArray", ArrayType(schemaFor(keyType).dataType),
-                returnNullable = false),
-              schemaFor(keyType).dataType),
-            "array",
-            ObjectType(classOf[Array[Any]]), returnNullable = false)
-
-        val valueData =
-          Invoke(
-            MapObjects(
-              p => deserializerFor(valueType, Some(p), walkedTypePath),
-              Invoke(getPath, "valueArray", ArrayType(schemaFor(valueType).dataType),
-                returnNullable = false),
-              schemaFor(valueType).dataType),
-            "array",
-            ObjectType(classOf[Array[Any]]), returnNullable = false)
-
-        StaticInvoke(
-          ArrayBasedMapData.getClass,
-          ObjectType(classOf[scala.collection.immutable.Map[_, _]]),
-          "toScalaMap",
-          keyData :: valueData :: Nil)
+        CatalystToExternalMap(
+          p => deserializerFor(keyType, Some(p), walkedTypePath),
+          p => deserializerFor(valueType, Some(p), walkedTypePath),
+          getPath,
+          mirror.runtimeClass(t.typeSymbol.asClass)
+        )
 
       case t if t.typeSymbol.annotations.exists(_.tpe =:= typeOf[SQLUserDefinedType]) =>
         val udt = getClassFromType(t).getAnnotation(classOf[SQLUserDefinedType]).udt().newInstance()
@@ -463,7 +448,8 @@ object ScalaReflection extends ScalaReflection {
               classOf[UnsafeArrayData],
               ArrayType(dt, false),
               "fromPrimitiveArray",
-              input :: Nil)
+              input :: Nil,
+              returnNullable = false)
           } else {
             NewInstance(
               classOf[GenericArrayData],
@@ -511,6 +497,7 @@ object ScalaReflection extends ScalaReflection {
           inputObject,
           dataTypeFor(keyType),
           serializerFor(_, keyType, keyPath, seenTypeSet),
+          keyNullable = !keyType.typeSymbol.asClass.isPrimitive,
           dataTypeFor(valueType),
           serializerFor(_, valueType, valuePath, seenTypeSet),
           valueNullable = !valueType.typeSymbol.asClass.isPrimitive)
@@ -520,49 +507,56 @@ object ScalaReflection extends ScalaReflection {
           classOf[UTF8String],
           StringType,
           "fromString",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.sql.Timestamp] =>
         StaticInvoke(
           DateTimeUtils.getClass,
           TimestampType,
           "fromJavaTimestamp",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.sql.Date] =>
         StaticInvoke(
           DateTimeUtils.getClass,
           DateType,
           "fromJavaDate",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[BigDecimal] =>
         StaticInvoke(
           Decimal.getClass,
           DecimalType.SYSTEM_DEFAULT,
           "apply",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.math.BigDecimal] =>
         StaticInvoke(
           Decimal.getClass,
           DecimalType.SYSTEM_DEFAULT,
           "apply",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.math.BigInteger] =>
         StaticInvoke(
           Decimal.getClass,
           DecimalType.BigIntDecimal,
           "apply",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[scala.math.BigInt] =>
         StaticInvoke(
           Decimal.getClass,
           DecimalType.BigIntDecimal,
           "apply",
-          inputObject :: Nil)
+          inputObject :: Nil,
+          returnNullable = false)
 
       case t if t <:< localTypeOf[java.lang.Integer] =>
         Invoke(inputObject, "intValue", IntegerType)
@@ -836,8 +830,16 @@ trait ScalaReflection {
   def getConstructorParameters(tpe: Type): Seq[(String, Type)] = {
     val formalTypeArgs = tpe.typeSymbol.asClass.typeParams
     val TypeRef(_, _, actualTypeArgs) = tpe
-    constructParams(tpe).map { p =>
-      p.name.toString -> p.typeSignature.substituteTypes(formalTypeArgs, actualTypeArgs)
+    val params = constructParams(tpe)
+    // if there are type variables to fill in, do the substitution (SomeClass[T] -> SomeClass[Int])
+    if (actualTypeArgs.nonEmpty) {
+      params.map { p =>
+        p.name.toString -> p.typeSignature.substituteTypes(formalTypeArgs, actualTypeArgs)
+      }
+    } else {
+      params.map { p =>
+        p.name.toString -> p.typeSignature
+      }
     }
   }
 
